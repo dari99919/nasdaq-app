@@ -1,49 +1,60 @@
 import streamlit as st
 import pandas as pd
-import os
 import engine
 
-st.set_page_config(page_title="Asesor Markowitz", layout="wide")
-st.title("📈 Optimizador de Cartera por Preferencias")
+st.title("🧠 Buscador Financiero Inteligente (Markowitz)")
 
-EXCEL_FILE = "Analisis_Cartera_Nasdaq_Markowitz.xlsx"
+# Cargamos todas las dimensiones del Excel
+@st.cache_data
+def cargar_unificado():
+    file = "Analisis_Cartera_Nasdaq_Markowitz.xlsx"
+    # Unimos sectores, fundamentales y yield en un solo gran DataFrame
+    df_sec = pd.read_excel(file, sheet_name='06_Sectores', index_col=0)
+    df_yield = pd.read_excel(file, sheet_name='07_Yield', index_col=0)
+    df_stats = pd.read_excel(file, sheet_name='03_Stats', index_col=0)
+    return pd.concat([df_sec, df_yield, df_stats], axis=1)
 
-# Buscador intuitivo
-consulta = st.text_input("¿Qué tipo de cartera buscas?", placeholder="Ej: Tecnología con dividendos")
+try:
+    df = cargar_unificado()
+    
+    # --- INTERFAZ DE FILTRADO ---
+    st.sidebar.header("Filtros Avanzados")
+    
+    # Filtro por Sector
+    sectores_libres = ["Todos"] + list(df['Sector'].unique())
+    sector_sel = st.sidebar.selectbox("Sector", sectores_libres)
+    
+    # Filtro por Dividendos
+    solo_div = st.sidebar.checkbox("Solo empresas con dividendos")
+    
+    # Filtros de Ratios (Valoración y Fundamentales)
+    per_max = st.sidebar.slider("PER Máximo", 0, 100, 100)
+    min_sharpe = st.sidebar.slider("Sharpe Mínimo", 0.0, 3.0, 0.0)
 
-if consulta:
-    if not os.path.exists(EXCEL_FILE):
-        st.error("El archivo de datos no existe. Debes ejecutar el extractor primero.")
+    # --- APLICACIÓN DE LOS FILTROS ---
+    mask = (df['PER'] <= per_max) & (df['Sharpe_Ratio'] >= min_sharpe)
+    
+    if sector_sel != "Todos":
+        mask = mask & (df['Sector'] == sector_sel)
+    
+    if solo_div:
+        mask = mask & (df['Yield_2024_%'] > 0)
+    
+    activos_finales = df[mask].index.tolist()
+
+    # --- EJECUCIÓN DEL MODELO ---
+    st.write(f"Empresas que cumplen el criterio: **{len(activos_finales)}**")
+    st.dataframe(df[mask][['Sector', 'PER', 'Yield_2024_%', 'Sharpe_Ratio']])
+
+    if len(activos_finales) >= 2:
+        if st.button("🚀 Calcular Cartera Óptima con estos filtros"):
+            fig, pesos, error = engine.optimizar_max_sharpe(activos_finales)
+            if not error:
+                st.pyplot(fig)
+                st.subheader("Composición Ideal:")
+                st.table(pesos[pesos > 0.01].map(lambda x: f"{x:.2%}"))
     else:
-        # Cargar metadatos para filtrar
-        df_sectores = pd.read_excel(EXCEL_FILE, sheet_name='06_Sectores', index_col=0)
-        df_yield = pd.read_excel(EXCEL_FILE, sheet_name='07_Yield', index_col=0)
-        
-        candidatos = df_sectores.index.tolist()
+        st.warning("Necesitas al menos 2 activos para el modelo de Markowitz.")
 
-        # 1. Filtro por Sector
-        if any(palabra in consulta.lower() for palabra in ["tech", "tecnología", "tecnológico"]):
-            candidatos = df_sectores[df_sectores['Sector'] == 'Technology'].index.tolist()
-        
-        # 2. Filtro por Dividendos
-        if "dividendo" in consulta.lower():
-            # Quedarse solo con los que tienen Yield > 0
-            candidatos = [t for t in candidatos if df_yield.loc[t, 'Yield_2024_%'] > 0]
-
-        if len(candidatos) > 1:
-            st.success(f"Analizando la combinación óptima de {len(candidatos)} activos encontrados.")
-            
-            if st.button("🚀 Calcular Cartera Óptima"):
-                with st.spinner("Buscando el máximo Ratio de Sharpe..."):
-                    fig, pesos, error = engine.optimizar_max_sharpe(candidatos)
-                    
-                    if error:
-                        st.error(error)
-                    else:
-                        st.pyplot(fig)
-                        st.subheader("Distribución de Capital Recomendada:")
-                        # Mostrar solo los que tengan más de un 1% de peso
-                        recomendados = pesos[pesos > 0.01].sort_values(ascending=False)
-                        st.table(recomendados.apply(lambda x: "{:.2%}".format(x)))
-        else:
-            st.warning("No hay suficientes activos (mínimo 2) para optimizar con esos filtros.")
+except Exception as e:
+    st.error("Primero ejecuta el Extractor para generar los datos.")
